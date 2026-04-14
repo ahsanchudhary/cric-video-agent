@@ -110,7 +110,8 @@ echo "  Title:   $TITLE"
 echo "  Privacy: $PRIVACY"
 echo "  Kids:    $([ "$NOT_FOR_KIDS" = true ] && echo "Not made for kids" || echo "Made for kids")"
 echo ""
-echo "Uploading..."
+echo "Uploading... (progress lines show speed, bytes, and ETA)"
+echo ""
 
 # Run youtubeuploader
 "$YOUTUBEUPLOADER" \

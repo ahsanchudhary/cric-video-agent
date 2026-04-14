@@ -1,3 +1,4 @@
 request.token
 bin/
 .encoding_*
+client_secrets.json

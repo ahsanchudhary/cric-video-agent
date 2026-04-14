@@ -60,13 +60,20 @@ echo "--- Step 1: Bootstrap ---"
 bash "$SCRIPT_DIR/scripts/bootstrap.sh"
 echo ""
 
-# Step 2: Encode
+# Step 2: Encode (stream to terminal so ffmpeg progress is visible; also save log for path parsing)
 echo "--- Step 2: Encode ---"
-ENCODE_OUTPUT=$(bash "$SCRIPT_DIR/scripts/encode.sh" "$INPUT_DIR" --parallel "$PARALLEL")
-echo "$ENCODE_OUTPUT"
+ENCODE_LOG=$(mktemp "${TMPDIR:-/tmp}/vw_encode_XXXXXX.log")
+set +e
+bash "$SCRIPT_DIR/scripts/encode.sh" "$INPUT_DIR" --parallel "$PARALLEL" 2>&1 | tee "$ENCODE_LOG"
+ENCODE_STATUS=${PIPESTATUS[0]}
+set -e
+OUTPUT_FILE=$(grep "Output:" "$ENCODE_LOG" | tail -1 | sed 's/.*Output: //')
+rm -f "$ENCODE_LOG"
 
-# Extract the output file path from encode.sh output
-OUTPUT_FILE=$(echo "$ENCODE_OUTPUT" | grep "Output:" | sed 's/.*Output: //')
+if [ "$ENCODE_STATUS" -ne 0 ]; then
+    echo "Error: Encode step failed." >&2
+    exit 1
+fi
 
 if [ -z "$OUTPUT_FILE" ] || [ ! -f "$OUTPUT_FILE" ]; then
     echo "Error: Could not determine encoded output file." >&2

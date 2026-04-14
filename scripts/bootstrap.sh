@@ -46,27 +46,26 @@ mkdir -p "$BIN_DIR"
 
 YOUTUBEUPLOADER="$BIN_DIR/youtubeuploader"
 
-if [ -x "$YOUTUBEUPLOADER" ]; then
+# Releases ship tarballs (e.g. youtubeuploader_1.25.5_Darwin_arm64.tar.gz), not a bare binary.
+if [ -f "$YOUTUBEUPLOADER" ] && file "$YOUTUBEUPLOADER" 2>/dev/null | grep -q "executable"; then
     echo "youtubeuploader already installed."
 else
     echo "Downloading youtubeuploader..."
 
-    # Determine architecture
     ARCH="$(uname -m)"
     case "$ARCH" in
-        x86_64|amd64) ARCH_SUFFIX="amd64" ;;
-        arm64|aarch64) ARCH_SUFFIX="arm64" ;;
+        x86_64|amd64) GOARCH="amd64" ;;
+        arm64|aarch64) GOARCH="arm64" ;;
         *)             echo "Error: Unsupported architecture: $ARCH"; exit 1 ;;
     esac
 
     if [ "$PLATFORM" = "mac" ]; then
-        OS_SUFFIX="darwin"
+        GOOS="Darwin"
     else
-        OS_SUFFIX="linux"
+        GOOS="Linux"
     fi
 
     RELEASE_URL="https://github.com/porjo/youtubeuploader/releases/latest"
-    # Fetch the latest release tag
     LATEST_TAG=$(curl -sI "$RELEASE_URL" | grep -i "^location:" | sed 's/.*tag\///' | tr -d '\r\n')
 
     if [ -z "$LATEST_TAG" ]; then
@@ -74,10 +73,15 @@ else
         exit 1
     fi
 
-    DOWNLOAD_URL="https://github.com/porjo/youtubeuploader/releases/download/${LATEST_TAG}/youtubeuploader_${OS_SUFFIX}_${ARCH_SUFFIX}"
+    VER="${LATEST_TAG#v}"
+    TARBALL="youtubeuploader_${VER}_${GOOS}_${GOARCH}.tar.gz"
+    DOWNLOAD_URL="https://github.com/porjo/youtubeuploader/releases/download/${LATEST_TAG}/${TARBALL}"
 
     echo "Downloading from: $DOWNLOAD_URL"
-    curl -sL "$DOWNLOAD_URL" -o "$YOUTUBEUPLOADER"
+    TMP_TAR=$(mktemp "${TMPDIR:-/tmp}/youtubeuploader_XXXXXX.tar.gz")
+    curl -fsSL "$DOWNLOAD_URL" -o "$TMP_TAR"
+    tar -xzf "$TMP_TAR" -C "$BIN_DIR" youtubeuploader
+    rm -f "$TMP_TAR"
     chmod +x "$YOUTUBEUPLOADER"
     echo "youtubeuploader installed to $YOUTUBEUPLOADER"
 fi

@@ -10,6 +10,7 @@ set -euo pipefail
 # chronological order (by original file modification time) into a single output.
 #
 # Output file is written to <input_directory>/combined_YYYYMMDD_HHMMSS.mp4
+# Per-file intermediates use <input_directory>/.encoding_XXXXXX/ (deleted after success).
 
 PARALLEL=3
 INPUT_DIR=""
@@ -87,8 +88,8 @@ for i in "${!SORTED_FILES[@]}"; do
 done
 echo ""
 
-# Create temp directory for encoded files
-ENCODE_DIR=$(mktemp -d "${TMPDIR:-/tmp}/.encoding_XXXXXX")
+# Working directory for per-file encodes + concat list (removed on successful exit)
+ENCODE_DIR=$(mktemp -d "${INPUT_DIR}/.encoding_XXXXXX")
 trap 'rm -rf "$ENCODE_DIR"' EXIT
 
 # === Parallel encoding ===
@@ -101,24 +102,18 @@ FAILED=0
 PIDS=()
 ENCODED_FILES=()
 
-# Track pid-to-file mapping
-declare -A PID_TO_FILE
-declare -A PID_TO_OUTPUT
+# Bash 3.2 (macOS default) has no associative arrays — use a pid map file.
+PID_MAP="${ENCODE_DIR}/pid_map.txt"
+: > "$PID_MAP"
 
-encode_file() {
-    local input="$1"
-    local index="$2"
-    local basename_noext
-    basename_noext="$(basename "${input%.*}")"
-    local output="${ENCODE_DIR}/${index}_${basename_noext}.mp4"
-
-    ffmpeg -y -i "$input" \
-        -c:v libx264 -crf 23 -preset medium \
-        -c:a aac -b:a 128k \
-        -loglevel warning -stats \
-        "$output" 2>&1 | sed "s/^/  [$(basename "$input")] /"
-
-    echo "$output"
+pid_to_basename() {
+    local want=$1 p rest
+    while IFS=$'\t' read -r p rest; do
+        if [ "$p" = "$want" ]; then
+            echo "$rest"
+            return 0
+        fi
+    done < "$PID_MAP"
 }
 
 # Run encoding jobs with parallelism limit
@@ -133,16 +128,18 @@ for i in "${!SORTED_FILES[@]}"; do
 
     echo "  Starting: $(basename "$input")"
 
+    # -stats + loglevel info: show frame/fps/speed/ETA (stderr). Prefix lines so parallel jobs stay readable.
     (
-        ffmpeg -y -i "$input" \
+        ffmpeg -nostdin -y -i "$input" \
             -c:v libx264 -crf 23 -preset medium \
             -c:a aac -b:a 128k \
-            -loglevel warning \
-            "$output"
+            -hide_banner -stats -loglevel info \
+            "$output" 2>&1 | tr '\r' '\n' | awk -v p="$(basename "$input")" '{ print "  [" p "] " $0 }'
     ) &
 
-    PIDS+=($!)
-    PID_TO_FILE[$!]="$(basename "$input")"
+    child_pid=$!
+    echo "${child_pid}"$'\t'"$(basename "$input")" >> "$PID_MAP"
+    PIDS+=("$child_pid")
     running=$((running + 1))
 
     # Wait if we've hit the parallelism limit
@@ -150,10 +147,10 @@ for i in "${!SORTED_FILES[@]}"; do
         for pid in "${PIDS[@]}"; do
             if wait "$pid" 2>/dev/null; then
                 COMPLETED=$((COMPLETED + 1))
-                echo "  Done ($COMPLETED/$TOTAL): ${PID_TO_FILE[$pid]}"
+                echo "  Done ($COMPLETED/$TOTAL): $(pid_to_basename "$pid")"
             else
                 FAILED=$((FAILED + 1))
-                echo "  FAILED: ${PID_TO_FILE[$pid]}" >&2
+                echo "  FAILED: $(pid_to_basename "$pid")" >&2
             fi
         done
         PIDS=()
@@ -165,10 +162,10 @@ done
 for pid in "${PIDS[@]}"; do
     if wait "$pid" 2>/dev/null; then
         COMPLETED=$((COMPLETED + 1))
-        echo "  Done ($COMPLETED/$TOTAL): ${PID_TO_FILE[$pid]}"
+        echo "  Done ($COMPLETED/$TOTAL): $(pid_to_basename "$pid")"
     else
         FAILED=$((FAILED + 1))
-        echo "  FAILED: ${PID_TO_FILE[$pid]}" >&2
+        echo "  FAILED: $(pid_to_basename "$pid")" >&2
     fi
 done
 
@@ -182,7 +179,8 @@ fi
 
 # === Concatenation ===
 echo ""
-echo "Concatenating files in chronological order..."
+echo "Concatenating in chronological order (re-encoding join for correct duration)..."
+echo "  (Stream-copy concat can report bogus multi-hour video lengths when sources had messy timestamps.)"
 
 # Build ffmpeg concat file list
 CONCAT_LIST="${ENCODE_DIR}/concat_list.txt"
@@ -193,7 +191,13 @@ done
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
 OUTPUT_FILE="${INPUT_DIR}/combined_${TIMESTAMP}.mp4"
 
-ffmpeg -y -f concat -safe 0 -i "$CONCAT_LIST" -c copy "$OUTPUT_FILE" -loglevel warning
+# Re-encode the joined sequence (same settings as per-file) so video/audio share one timeline.
+# Using -c copy here often leaves invalid video duration metadata (~hours) while audio stays correct.
+ffmpeg -nostdin -y -f concat -safe 0 -i "$CONCAT_LIST" \
+    -c:v libx264 -crf 23 -preset medium \
+    -c:a aac -b:a 128k \
+    -hide_banner -stats -loglevel info \
+    "$OUTPUT_FILE" 2>&1 | tr '\r' '\n' | awk '{ print "  [concat] " $0 }'
 
 # Get file size
 if [[ "$(uname -s)" == "Darwin" ]]; then
